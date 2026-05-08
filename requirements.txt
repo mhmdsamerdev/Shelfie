@@ -6,7 +6,7 @@ PyMuPDF==1.24.5
 EbookLib==0.18
 watchdog==4.0.1
 Pillow==12.2.0
-python-multipart==0.0.26
+python-multipart==0.0.27
 aiofiles==23.2.1
 lxml==6.1.0
 html5lib==1.1
