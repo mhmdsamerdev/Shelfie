@@ -604,6 +604,51 @@ body.modal-open { overflow: hidden; }
   background: var(--red-dim);
 }
 
+/* Libraries */
+.library-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text2);
+  cursor: pointer;
+  transition: all .14s;
+  border: 1px solid transparent;
+  position: relative;
+}
+.library-item:hover {
+  color: var(--text);
+  background: var(--surf2);
+}
+.library-item.active {
+  color: var(--gold);
+  background: var(--gold-glow);
+  border-color: rgba(200,167,106,.2);
+}
+.library-action-btn {
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity .14s, color .14s, background .14s;
+}
+.library-item:hover .library-action-btn {
+  opacity: 1;
+}
+.library-action-btn:hover {
+  color: var(--red);
+  background: var(--red-dim);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   #sidebar { transform: translateX(-100%); }
@@ -627,9 +672,17 @@ body.modal-open { overflow: hidden; }
   <div style="padding:18px 14px 14px; border-bottom:1px solid var(--border)">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:5px">
       <div><span class="logo-bar"></span><span class="logo-bar" style="width:16px"></span></div>
-      <span class="serif" style="font-size:17px;color:var(--gold)">Library</span>
+      <span class="serif" style="font-size:17px;color:var(--gold)">Shelfie</span>
     </div>
     <p id="sidebar-path" style="font-size:10.5px;color:var(--text3);font-family:var(--mono);word-break:break-all;line-height:1.4">…</p>
+  </div>
+
+  <!-- Libraries Section -->
+  <div style="padding:10px 10px 0; border-bottom:1px solid var(--border); padding-bottom: 12px;">
+    <div class="section-label" style="margin-top: 0;">Libraries</div>
+    <div id="libraries-list" style="display:flex;flex-direction:column;gap:4px;">
+      <!-- Filled dynamically -->
+    </div>
   </div>
 
   <div style="padding:10px 10px 0">
@@ -752,29 +805,42 @@ body.modal-open { overflow: hidden; }
      SETTINGS MODAL
 ══════════════════════════════════════════════════════════ -->
 <div id="settings-overlay" onclick="settingsOverlayClick(event)">
-  <div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;width:100%;max-width:400px;padding:22px">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-      <h2 class="serif" style="font-size:17px">Settings</h2>
+  <div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;width:100%;max-width:500px;padding:22px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-shrink:0;">
+      <h2 class="serif" style="font-size:17px" id="settings-title">Settings</h2>
       <button onclick="closeSettings()" class="btn btn-icon btn-ghost" style="color:var(--text3)">✕</button>
     </div>
-    <label style="font-size:11.5px;color:var(--text3);display:block;margin-bottom:5px">Library Folder Path</label>
-    <input id="settings-path" class="field" placeholder="/Users/you/Books" style="margin-bottom:9px"/>
-    <p style="font-size:11.5px;color:var(--text3);margin-bottom:6px;line-height:1.5">
-      Full path to your folder of PDFs and EPUBs. Auto-synced via Watchdog.
-    </p>
-    <p id="settings-docker-hint" style="display:none;font-size:11.5px;line-height:1.5;margin-bottom:14px;padding:8px 10px;background:var(--blue-dim);border:1px solid rgba(91,156,246,.25);border-radius:7px;color:var(--blue)">
-      Running via Docker? Enter the <strong>container-internal path</strong> mapped in your
-      compose file — not the path on your host machine. The default mapping is
-      <code style="font-family:var(--mono);font-size:11px">/books</code>.
-    </p>
-    <p id="settings-local-hint" style="display:none;font-size:11.5px;color:var(--text3);margin-bottom:14px;line-height:1.5">
-      Enter the full path to your books folder on this machine, e.g.
-      <code style="font-family:var(--mono);font-size:11px">/home/you/Books</code> or
-      <code style="font-family:var(--mono);font-size:11px">D:\Books</code>.
-    </p>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="saveSettings()">Save & Rescan</button>
+    
+    <div style="flex:1;overflow-y:auto;padding-right:4px;">
+      <!-- Watched Folders -->
+      <div style="margin-bottom:18px">
+        <h3 class="serif" style="font-size:14px;color:var(--gold);margin-bottom:8px">Watched Folders</h3>
+        <div id="settings-folders-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+          <!-- list of folders with delete button -->
+        </div>
+        
+        <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:5px">Add Watched Folder Path</label>
+        <div style="display:flex;gap:8px;">
+          <input id="settings-new-folder-path" class="field" placeholder="/home/user/Books"/>
+          <button class="btn btn-primary btn-sm" onclick="addFolderFromSettings()">Add</button>
+        </div>
+      </div>
+
+      <!-- Hints -->
+      <p id="settings-docker-hint" style="display:none;font-size:11.5px;line-height:1.5;margin-bottom:14px;padding:8px 10px;background:var(--blue-dim);border:1px solid rgba(91,156,246,.25);border-radius:7px;color:var(--blue)">
+        Running via Docker? Enter the <strong>container-internal path</strong> mapped in your
+        compose file — not the path on your host machine. The default mapping is
+        <code style="font-family:var(--mono);font-size:11px">/books</code>.
+      </p>
+      <p id="settings-local-hint" style="display:none;font-size:11.5px;color:var(--text3);margin-bottom:14px;line-height:1.5">
+        Enter the full path to your books folder on this machine, e.g.
+        <code style="font-family:var(--mono);font-size:11px">/home/you/Books</code> or
+        <code style="font-family:var(--mono);font-size:11px">D:\Books</code>.
+      </p>
+    </div>
+    
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-shrink:0;border-top:1px solid var(--border);padding-top:14px">
+      <button class="btn btn-ghost btn-sm" onclick="closeSettings()">Close</button>
     </div>
   </div>
 </div>
@@ -792,11 +858,12 @@ body.modal-open { overflow: hidden; }
 let allBooks = [], currentFilter = 'all', activeTag = null, activeCategory = null;
 let searchQuery = '', gridView = true, _debTimer;
 let _book = null, _logs = [], _quotes = [], _activeTab = 'details';
+let activeLibraryId = null, libraries = [];
 
 // ── Bootstrap ──────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadLibraries();
   loadAll();
-  loadLibraryPath();
   loadVersionStatus();
   setInterval(() => { loadBooks(); loadStats(); }, 30000);
 });
@@ -820,10 +887,131 @@ async function apiForm(method, path, formData) {
 }
 
 // ── Loaders ────────────────────────────────────────────────────────────────────
+async function loadLibraries() {
+  try {
+    libraries = await api('GET', '/api/libraries');
+    let storedId = localStorage.getItem('shelfie_active_library_id');
+    let activeLib = libraries.find(l => l.id == storedId);
+    if (!activeLib && libraries.length > 0) {
+      activeLib = libraries[0];
+    }
+    activeLibraryId = activeLib ? activeLib.id : null;
+    if (activeLibraryId) {
+      localStorage.setItem('shelfie_active_library_id', activeLibraryId);
+    }
+    renderLibrarySelector();
+  } catch (e) {
+    toast('Could not load libraries', true);
+  }
+}
+
+function renderLibrarySelector() {
+  const listEl = document.getElementById('libraries-list');
+  if (!listEl) return;
+  
+  let html = libraries.map(lib => {
+    const isActive = lib.id == activeLibraryId;
+    return `
+      <div class="library-item ${isActive ? 'active' : ''}" onclick="switchActiveLibrary(${lib.id})">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px;" title="${x(lib.name)}">${x(lib.name)}</span>
+        <button class="library-action-btn" onclick="event.stopPropagation(); deleteLibraryFromSidebar(${lib.id})" title="Delete library">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+        </button>
+      </div>
+    `;
+  }).join('');
+  
+  html += `
+    <div class="library-item" onclick="createLibraryFromSidebar()" style="color: var(--gold); border: 1px dashed rgba(200,167,106,.2); justify-content: center; font-style: italic; margin-top: 4px;">
+      + Create Library
+    </div>
+  `;
+  
+  listEl.innerHTML = html;
+  
+  const activeLib = libraries.find(l => l.id == activeLibraryId);
+  const pathEl = document.getElementById('sidebar-path');
+  if (pathEl) {
+    if (activeLib && activeLib.folders && activeLib.folders.length > 0) {
+      const paths = activeLib.folders.map(f => f.path);
+      const mainPath = paths[0];
+      const trunc = mainPath.length > 36 ? '…' + mainPath.slice(-34) : mainPath;
+      pathEl.textContent = trunc + (paths.length > 1 ? ` (+${paths.length - 1} folders)` : '');
+    } else {
+      pathEl.textContent = 'No folders configured';
+    }
+  }
+}
+
+async function switchActiveLibrary(id) {
+  activeLibraryId = id;
+  localStorage.setItem('shelfie_active_library_id', activeLibraryId);
+  renderLibrarySelector();
+  loadAll();
+}
+
+async function createLibraryFromSidebar() {
+  const name = prompt("Enter new library name:");
+  if (name && name.trim()) {
+    try {
+      const newLib = await api('POST', '/api/libraries', { name: name.trim() });
+      toast(`Created library "${newLib.name}"`);
+      activeLibraryId = newLib.id;
+      localStorage.setItem('shelfie_active_library_id', activeLibraryId);
+      await loadLibraries();
+      loadAll();
+    } catch (e) {
+      toast(e.message || 'Could not create library', true);
+    }
+  }
+}
+
+async function deleteLibraryFromSidebar(libId) {
+  const lib = libraries.find(l => l.id == libId);
+  if (!lib) return;
+  
+  try {
+    const books = await api('GET', `/api/books?library_id=${libId}`);
+    const count = books.length;
+    
+    if (!confirm(`Are you sure you want to delete the library "${lib.name}"? This will delete all ${count} books and their reading history. Files on disk will NOT be touched.`)) {
+      return;
+    }
+    
+    await api('DELETE', `/api/libraries/${libId}`);
+    toast(`Deleted library "${lib.name}"`);
+    
+    libraries = libraries.filter(l => l.id != libId);
+    if (libraries.length > 0) {
+      if (activeLibraryId == libId) {
+        activeLibraryId = libraries[0].id;
+      }
+    } else {
+      activeLibraryId = null;
+    }
+    
+    if (activeLibraryId) {
+      localStorage.setItem('shelfie_active_library_id', activeLibraryId);
+    } else {
+      localStorage.removeItem('shelfie_active_library_id');
+    }
+    
+    await loadLibraries();
+    loadAll();
+  } catch (e) {
+    toast('Could not delete library', true);
+  }
+}
+
 async function loadBooks() {
+  if (!activeLibraryId) {
+    renderGrid([]);
+    return;
+  }
   spin(true);
   try {
     const p = new URLSearchParams();
+    p.set('library_id', activeLibraryId);
     if (searchQuery) p.set('q', searchQuery);
     allBooks = await api('GET', `/api/books?${p}`);
     renderGrid(filterBooks(allBooks));
@@ -832,8 +1020,9 @@ async function loadBooks() {
 }
 
 async function loadStats() {
+  if (!activeLibraryId) return;
   try {
-    const s = await api('GET', '/api/stats');
+    const s = await api('GET', `/api/stats?library_id=${activeLibraryId}`);
     document.getElementById('st-total').textContent  = s.total;
     document.getElementById('st-read').textContent   = s.read;
     document.getElementById('st-prog').textContent   = s.in_progress;
@@ -845,9 +1034,10 @@ async function loadStats() {
 }
 
 async function loadSidebar() {
+  if (!activeLibraryId) return;
   const [cats, tags] = await Promise.all([
-    api('GET', '/api/categories').catch(()=>[]),
-    api('GET', '/api/tags').catch(()=>[]),
+    api('GET', `/api/categories?library_id=${activeLibraryId}`).catch(()=>[]),
+    api('GET', `/api/tags?library_id=${activeLibraryId}`).catch(()=>[]),
   ]);
   document.getElementById('category-list').innerHTML = cats.length
     ? cats.map(c => `<div class="nav-item ${activeCategory===c?'active':''}" onclick="filterByCategory('${x(c)}')">${x(c)}</div>`).join('')
@@ -1420,28 +1610,107 @@ async function handleCoverUpload(e) {
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────────
-function openSettings() {
+let isDockerEnv = false;
+
+async function openSettings() {
+  if (!activeLibraryId) {
+    toast('Please select or create a library first', true);
+    return;
+  }
   document.getElementById('settings-overlay').classList.add('open');
+  const pathInfo = await api('GET', '/api/library-path').catch(()=>({path:'', is_docker:false}));
+  isDockerEnv = pathInfo.is_docker;
+  
+  renderSettingsLibraryDetail();
 }
+
 function closeSettings() {
   document.getElementById('settings-overlay').classList.remove('open');
 }
+
 function settingsOverlayClick(e) {
   if (e.target === document.getElementById('settings-overlay')) closeSettings();
 }
-async function saveSettings() {
-  const path = document.getElementById('settings-path').value.trim();
+
+async function renderSettingsLibraryDetail() {
+  libraries = await api('GET', '/api/libraries');
+  const lib = libraries.find(l => l.id == activeLibraryId);
+  if (!lib) return;
+  
+  const titleEl = document.getElementById('settings-title');
+  if (titleEl) {
+    titleEl.textContent = `Settings - ${lib.name}`;
+  }
+  
+  const foldersList = document.getElementById('settings-folders-list');
+  if (foldersList) {
+    if (lib.folders && lib.folders.length > 0) {
+      foldersList.innerHTML = lib.folders.map(f => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:var(--surf2);border:1px solid var(--border);border-radius:7px;gap:8px;margin-bottom:6px;">
+          <span style="font-size:12px;font-family:var(--mono);color:var(--text);word-break:break-all;">${x(f.path)}</span>
+          <button class="quote-del" onclick="deleteFolderFromSettings(${f.id})" style="padding:4px;border-radius:5px;" title="Remove folder">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      `).join('');
+    } else {
+      foldersList.innerHTML = `<p style="font-size:12px;color:var(--text3);padding:4px 0">No folders configured yet.</p>`;
+    }
+  }
+  
+  const dockerHint = document.getElementById('settings-docker-hint');
+  const localHint  = document.getElementById('settings-local-hint');
+  if (dockerHint && localHint) {
+    if (isDockerEnv) {
+      dockerHint.style.display = 'block';
+      localHint.style.display  = 'none';
+    } else {
+      dockerHint.style.display = 'none';
+      localHint.style.display  = 'block';
+    }
+  }
+}
+
+async function addFolderFromSettings() {
+  if (!activeLibraryId) { toast('Select a library first', true); return; }
+  
+  const input = document.getElementById('settings-new-folder-path');
+  const path = input ? input.value.trim() : '';
+  if (!path) { toast('Enter folder path', true); return; }
+  
   try {
-    await api('POST', '/api/library-path', { path });
-    toast('Saved. Scanning…');
-    closeSettings(); loadLibraryPath();
-    setTimeout(loadAll, 2500);
-  } catch { toast('Invalid path', true); }
+    await api('POST', `/api/libraries/${activeLibraryId}/folders`, { path });
+    toast('Folder added! Scanning books...');
+    if (input) input.value = '';
+    
+    await renderSettingsLibraryDetail();
+    renderLibrarySelector();
+    setTimeout(loadAll, 2000);
+  } catch (e) {
+    toast(e.message || 'Invalid folder path', true);
+  }
+}
+
+async function deleteFolderFromSettings(folderId) {
+  if (!confirm('Are you sure you want to remove this folder from the library? Any books scanned from it will be pruned.')) {
+    return;
+  }
+  try {
+    await api('DELETE', `/api/libraries/${activeLibraryId}/folders/${folderId}`);
+    toast('Folder removed.');
+    
+    await renderSettingsLibraryDetail();
+    renderLibrarySelector();
+    setTimeout(loadAll, 2000);
+  } catch (e) {
+    toast('Could not remove folder', true);
+  }
 }
 
 async function rescan() {
+  if (!activeLibraryId) { toast('No active library', true); return; }
   toast('Rescanning…');
-  await api('POST', '/api/rescan');
+  await api('POST', `/api/rescan?library_id=${activeLibraryId}`);
   setTimeout(loadAll, 3000);
 }
 
