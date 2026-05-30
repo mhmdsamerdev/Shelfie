@@ -53,3 +53,13 @@ docker push mhmdsamerdev/shelfie:latest
 ```
 
 3. Verify: https://hub.docker.com/r/mhmdsamerdev/shelfie
+
+## Running Locally
+
+To run the application locally for development:
+
+1. `git clone https://github.com/mhmdsamerdev/shelfie.git` 
+2. `uv venv --python 3.12`
+3. `source .venv/bin/activate`
+4. `uv pip sync -r requirements.txt`
+5. `PYTHONPATH=src python -m shelfie.main --reload`

@@ -13,6 +13,12 @@ Designed with simplicity in mind, Shelfie automatically watches your book folder
 ## Installation
 
 ### Pip
+
+Requirements:
+
+- [Python 3.11+](https://www.python.org/) *Best works with Python 3.12*
+- [pip](https://pip.pypa.io/en/stable/)
+
 The stable releases of _shelfie_ are distributed on [PyPI](https://pypi.org/) and can be easily installed or upgraded using [pip](https://pip.pypa.io/en/stable/):
 ```
 pip install shelfie-py
@@ -20,7 +26,7 @@ shelfie
 ```
 ### Docker
 ```
-git clone https://github.com/mhmdsamer-dev/shelfie.git
+git clone https://github.com/mhmdsamerdev/shelfie.git
 cd shelfie/
 docker build -t shelfie .
 BOOKS_DIR=REPLACE/YOUR/BOOK/PATH docker compose up -d
