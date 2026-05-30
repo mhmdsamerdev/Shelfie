@@ -18,7 +18,7 @@ from importlib.resources import files as _pkg_files
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from PIL import Image
@@ -294,6 +294,11 @@ async def root(request: Request):
         "index.html",
         {"library_path": load_library_path()},
     )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse(STATIC_DIR / "favicon.png")
 
 
 # ── Book CRUD ──────────────────────────────────────────────────────────────────
