@@ -124,12 +124,18 @@ def extract_epub_metadata(file_path: str) -> tuple[str, int | None, str | None]:
 
 # ── Core DB helpers ───────────────────────────────────────────────────────────
 
-def add_book_to_db(session: Session, file_path: str) -> Book | None:
+def add_book_to_db(session: Session, library_id: int, file_path: str) -> Book | None:
     """Add a book if not already tracked.  Returns the new Book or None."""
     # Normalise to absolute path so Docker volume paths are stable
     file_path = str(Path(file_path).resolve())
 
-    if get_book_by_path(session, file_path):
+    existing = get_book_by_path(session, file_path)
+    if existing:
+        if existing.library_id != library_id:
+            existing.library_id = library_id
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
         return None
 
     ext = Path(file_path).suffix.lower()
@@ -144,6 +150,7 @@ def add_book_to_db(session: Session, file_path: str) -> Book | None:
         file_type = "epub"
 
     book = Book(
+        library_id  = library_id,
         file_path   = file_path,
         title       = title,
         file_type   = file_type,
@@ -153,7 +160,7 @@ def add_book_to_db(session: Session, file_path: str) -> Book | None:
     session.add(book)
     session.commit()
     session.refresh(book)
-    logger.info("Added: %s", title)
+    logger.info("Added to library %d: %s", library_id, title)
     return book
 
 
@@ -164,82 +171,190 @@ def remove_book_from_db(session: Session, file_path: str) -> None:
     if book:
         if book.cover_path:
             try:
-                Path(book.cover_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+                # Remove static/ prefix if present to delete the actual file
+                p = book.cover_path
+                if p.startswith("static/"):
+                    # Serve path is relative to package or DATA_DIR, but actual covers are in COVERS_DIR
+                    fname = p.split("/")[-1]
+                    cover_file = COVERS_DIR / fname
+                    if cover_file.exists():
+                        cover_file.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning("Could not delete cover image file %s: %s", book.cover_path, e)
         book.tags = []
         session.flush()
         session.delete(book)
         session.commit()
-        logger.info("Removed: %s", file_path)
+        logger.info("Removed book: %s", file_path)
 
 
 # ── Full scan ─────────────────────────────────────────────────────────────────
 
-def scan_library(library_path: str) -> None:
-    """Walk the library folder, add new files, remove stale DB entries."""
-    folder = Path(library_path).resolve()
-    if not folder.exists():
-        logger.error("Library folder does not exist: %s", folder)
-        return
+def scan_library(library_id: int) -> None:
+    """Walk all folders watched by the library, add new files, remove stale DB entries."""
+    from sqlmodel import select
+    from shelfie.database import Library, Book
 
     with Session(engine) as session:
-        for root, _, files in os.walk(folder):
-            for fname in files:
-                ext = Path(fname).suffix.lower()
-                if ext in SUPPORTED_EXTENSIONS:
-                    full_path = str(Path(root).resolve() / fname)
-                    add_book_to_db(session, full_path)
+        library = session.get(Library, library_id)
+        if not library:
+            logger.error("Library %d not found for scanning.", library_id)
+            return
 
-        # Prune books whose files have been deleted
-        from shelfie.database import get_all_books
-        for book in get_all_books(session):
-            if not Path(book.file_path).exists():
-                remove_book_from_db(session, book.file_path)
+        scanned_paths = set()
+        for folder_item in library.folders:
+            folder = Path(folder_item.path).resolve()
+            if not folder.exists():
+                logger.warning("Library folder does not exist: %s", folder)
+                continue
 
-    logger.info("Scan complete for: %s", folder)
+            for root, _, files in os.walk(folder):
+                for fname in files:
+                    ext = Path(fname).suffix.lower()
+                    if ext in SUPPORTED_EXTENSIONS:
+                        full_path = str(Path(root).resolve() / fname)
+                        add_book_to_db(session, library_id, full_path)
+                        scanned_paths.add(full_path)
+
+        # Prune books whose files have been deleted from disk (only for scanned books)
+        books = session.exec(select(Book).where(Book.library_id == library_id)).all()
+        for book in books:
+            if book.file_path:
+                resolved_path = Path(book.file_path).resolve()
+                if not resolved_path.exists():
+                    remove_book_from_db(session, book.file_path)
+
+    logger.info("Scan complete for library: %s", library.name)
 
 
 # ── Watchdog ──────────────────────────────────────────────────────────────────
 
-def start_watchdog(library_path: str):
-    """
-    Start a background observer.
+import threading
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers.polling import PollingObserver
 
-    Uses PollingObserver so events fire correctly on:
-      - Docker bind-mounts
-      - NFS / SMB / FUSE volumes
-      - Any filesystem that doesn't propagate kernel inotify events
-    """
-    from watchdog.events import FileSystemEventHandler
-    from watchdog.observers.polling import PollingObserver
+_observer = None
+_active_watches = {}  # folder_path -> Watch object
+_watchdog_lock = threading.Lock()
 
-    class LibraryHandler(FileSystemEventHandler):
-        @staticmethod
-        def _supported(path: str) -> bool:
-            return Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
 
-        def on_created(self, event):
-            if not event.is_directory and self._supported(event.src_path):
+class GlobalLibraryHandler(FileSystemEventHandler):
+    @staticmethod
+    def _supported(path: str) -> bool:
+        return Path(path).suffix.lower() in SUPPORTED_EXTENSIONS
+
+    def _get_library_id(self, file_path: str) -> int | None:
+        from sqlmodel import select
+        from shelfie.database import LibraryFolder
+        with Session(engine) as session:
+            folders = session.exec(select(LibraryFolder)).all()
+            folders = sorted(folders, key=lambda f: len(f.path), reverse=True)
+            p_file = Path(file_path).resolve()
+            for folder in folders:
+                try:
+                    p_folder = Path(folder.path).resolve()
+                    if p_folder == p_file or p_folder in p_file.parents:
+                        return folder.library_id
+                except Exception:
+                    pass
+        return None
+
+    def on_created(self, event):
+        if not event.is_directory and self._supported(event.src_path):
+            lib_id = self._get_library_id(event.src_path)
+            if lib_id is not None:
                 with Session(engine) as s:
-                    add_book_to_db(s, event.src_path)
+                    add_book_to_db(s, lib_id, event.src_path)
 
-        def on_deleted(self, event):
-            if not event.is_directory and self._supported(event.src_path):
+    def on_deleted(self, event):
+        if not event.is_directory and self._supported(event.src_path):
+            with Session(engine) as s:
+                remove_book_from_db(s, event.src_path)
+
+    def on_moved(self, event):
+        if not event.is_directory:
+            src_supported = self._supported(event.src_path)
+            dest_supported = self._supported(event.dest_path)
+            if src_supported or dest_supported:
                 with Session(engine) as s:
-                    remove_book_from_db(s, event.src_path)
+                    src_lib_id = self._get_library_id(event.src_path)
+                    dest_lib_id = self._get_library_id(event.dest_path)
+                    
+                    if src_lib_id is not None and dest_lib_id is not None and src_lib_id == dest_lib_id:
+                        # Move within the same library: update file_path of existing Book to preserve metadata!
+                        from shelfie.database import get_book_by_path
+                        book = get_book_by_path(s, event.src_path)
+                        if book:
+                            book.file_path = str(Path(event.dest_path).resolve())
+                            s.add(book)
+                            s.commit()
+                            logger.info("Moved book inside library %d: %s -> %s", dest_lib_id, event.src_path, event.dest_path)
+                        else:
+                            add_book_to_db(s, dest_lib_id, event.dest_path)
+                    else:
+                        # Deletion and creation across libraries/untracked
+                        if src_supported:
+                            remove_book_from_db(s, event.src_path)
+                        if dest_supported and dest_lib_id is not None:
+                            add_book_to_db(s, dest_lib_id, event.dest_path)
 
-        def on_moved(self, event):
-            if not event.is_directory:
-                with Session(engine) as s:
-                    if self._supported(event.src_path):
-                        remove_book_from_db(s, event.src_path)
-                    if self._supported(event.dest_path):
-                        add_book_to_db(s, event.dest_path)
 
-    observer = PollingObserver(timeout=5)   # poll every 5 s
-    observer.schedule(LibraryHandler(), path=str(Path(library_path).resolve()), recursive=True)
-    observer.daemon = True
-    observer.start()
-    logger.info("PollingObserver started on: %s", library_path)
-    return observer
+def sync_watchdog_observers() -> None:
+    """Sync Watchdog watches with LibraryFolder entries in the database (diff-based)."""
+    global _observer
+    from sqlmodel import select
+    from shelfie.database import LibraryFolder
+
+    with _watchdog_lock:
+        if _observer is None:
+            _observer = PollingObserver(timeout=5)
+            _observer.daemon = True
+            _observer.start()
+            logger.info("Global PollingObserver started.")
+
+        with Session(engine) as session:
+            folders = session.exec(select(LibraryFolder)).all()
+            db_paths = {str(Path(f.path).resolve()): f for f in folders}
+
+        # 1. Unschedule paths that are no longer in the DB
+        stale_paths = []
+        for path, watch_key in list(_active_watches.items()):
+            if path not in db_paths:
+                try:
+                    _observer.unschedule(watch_key)
+                    logger.info("Unscheduled watchdog for: %s", path)
+                except Exception as e:
+                    logger.warning("Failed to unschedule %s: %s", path, e)
+                stale_paths.append(path)
+        
+        for path in stale_paths:
+            del _active_watches[path]
+
+        # 2. Schedule paths that are new in the DB
+        handler = GlobalLibraryHandler()
+        for path in db_paths:
+            if path not in _active_watches:
+                if Path(path).exists():
+                    try:
+                        watch_key = _observer.schedule(handler, path=path, recursive=True)
+                        _active_watches[path] = watch_key
+                        logger.info("Scheduled watchdog for: %s", path)
+                    except Exception as e:
+                        logger.error("Failed to schedule watchdog for %s: %s", path, e)
+                else:
+                    logger.warning("Cannot watch folder (not found): %s", path)
+
+
+def stop_watchdog() -> None:
+    """Stop the global observer and clear all active watches."""
+    global _observer
+    with _watchdog_lock:
+        if _observer is not None:
+            try:
+                _observer.stop()
+                _observer.join(timeout=2)
+                _observer = None
+                _active_watches.clear()
+                logger.info("Global PollingObserver stopped.")
+            except Exception as e:
+                logger.warning("Error stopping observer: %s", e)
