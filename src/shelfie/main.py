@@ -34,12 +34,15 @@ from shelfie.config import (
     MAX_UPLOAD_BYTES,
 )
 from shelfie.database import (
+    Library,
+    LibraryFolder,
     Book,
     BookQuote,
     ProgressLog,
     Tag,
     add_progress_log,
     create_db_and_tables,
+    engine,
     get_all_books,
     get_or_create_tag,
     get_progress_logs,
@@ -51,7 +54,8 @@ from shelfie.scanner import (
     extract_epub_metadata,
     extract_pdf_metadata,
     scan_library,
-    start_watchdog,
+    sync_watchdog_observers,
+    stop_watchdog,
 )
 from shelfie.version_check import check_for_newer_release
 
@@ -169,24 +173,42 @@ app.mount(
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
-_watchdog_observer = None
-
-
 @app.on_event("startup")
 def on_startup() -> None:
-    global _watchdog_observer
     if not _update_check_disabled():
         threading.Thread(target=_log_if_update_available, daemon=True).start()
     create_db_and_tables()
-    lib = load_library_path()
-    if Path(lib).exists():
-        threading.Thread(target=scan_library, args=(lib,), daemon=True).start()
-        _watchdog_observer = start_watchdog(lib)
-    else:
-        logger.warning("Library folder not found: %s — set it via the UI.", lib)
+    
+    # Run scan for all libraries in background threads
+    with Session(engine) as session:
+        libraries = session.exec(select(Library)).all()
+        for lib in libraries:
+            threading.Thread(target=scan_library, args=(lib.id,), daemon=True).start()
+            
+    sync_watchdog_observers()
+
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    stop_watchdog()
 
 
 # ── Pydantic schemas ───────────────────────────────────────────────────────────
+
+class LibraryFolderOut(BaseModel):
+    id: int
+    path: str
+
+class LibraryOut(BaseModel):
+    id: int
+    name: str
+    folders: list[LibraryFolderOut]
+
+class LibraryCreate(BaseModel):
+    name: str
+
+class LibraryFolderCreate(BaseModel):
+    path: str
 
 class BookUpdate(BaseModel):
     current_page: int | None = None
@@ -305,12 +327,17 @@ async def favicon():
 
 @app.get("/api/books")
 def list_books(
+    library_id: int | None = None,
     category: str | None = None,
     tag: str | None = None,
     q: str | None = None,
     session: Session = Depends(get_session),
 ):
-    books = session.exec(select(Book)).all()
+    if library_id is None:
+        first_lib = session.exec(select(Library)).first()
+        library_id = first_lib.id if first_lib else 0
+        
+    books = session.exec(select(Book).where(Book.library_id == library_id)).all()
     if category:
         books = [b for b in books if (b.category or "").lower() == category.lower()]
     if tag:
@@ -397,7 +424,12 @@ def delete_book(book_id: int, session: Session = Depends(get_session)):
         raise HTTPException(404, "Book not found")
     if book.cover_path:
         try:
-            Path(book.cover_path).unlink(missing_ok=True)
+            p = book.cover_path
+            if p.startswith("static/"):
+                fname = p.split("/")[-1]
+                cover_file = COVERS_DIR / fname
+                if cover_file.exists():
+                    cover_file.unlink(missing_ok=True)
         except Exception:
             pass
     book.tags = []
@@ -606,23 +638,135 @@ def delete_quote(book_id: int, quote_id: int, session: Session = Depends(get_ses
 
 # ── Misc endpoints ─────────────────────────────────────────────────────────────
 
+# ── Library APIs ──────────────────────────────────────────────────────────────
+
+@app.get("/api/libraries", response_model=list[LibraryOut])
+def list_libraries(session: Session = Depends(get_session)):
+    libraries = session.exec(select(Library)).all()
+    out = []
+    for lib in libraries:
+        folders_out = [LibraryFolderOut(id=f.id, path=f.path) for f in lib.folders]
+        out.append(LibraryOut(id=lib.id, name=lib.name, folders=folders_out))
+    return out
+
+
+@app.post("/api/libraries", response_model=LibraryOut)
+def create_library(data: LibraryCreate, session: Session = Depends(get_session)):
+    name_stripped = data.name.strip()
+    if not name_stripped:
+        raise HTTPException(400, "Library name cannot be empty")
+    existing = session.exec(select(Library).where(Library.name == name_stripped)).first()
+    if existing:
+        raise HTTPException(400, f"Library '{name_stripped}' already exists")
+    lib = Library(name=name_stripped)
+    session.add(lib)
+    session.commit()
+    session.refresh(lib)
+    return LibraryOut(id=lib.id, name=lib.name, folders=[])
+
+
+@app.delete("/api/libraries/{library_id}")
+def delete_library(library_id: int, session: Session = Depends(get_session)):
+    lib = session.get(Library, library_id)
+    if not lib:
+        raise HTTPException(404, "Library not found")
+    
+    for book in lib.books:
+        if book.cover_path:
+            try:
+                p = book.cover_path
+                if p.startswith("static/"):
+                    fname = p.split("/")[-1]
+                    cover_file = COVERS_DIR / fname
+                    if cover_file.exists():
+                        cover_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+    
+    session.delete(lib)
+    session.commit()
+    sync_watchdog_observers()
+    return {"ok": True}
+
+
+# ── Library Folder APIs ────────────────────────────────────────────────────────
+
+@app.post("/api/libraries/{library_id}/folders", response_model=LibraryFolderOut)
+def add_library_folder(library_id: int, data: LibraryFolderCreate, session: Session = Depends(get_session)):
+    lib = session.get(Library, library_id)
+    if not lib:
+        raise HTTPException(404, "Library not found")
+    
+    path_stripped = data.path.strip()
+    p = Path(path_stripped).resolve()
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(400, f"Path does not exist or is not a directory: {path_stripped}")
+    
+    existing = session.exec(select(LibraryFolder).where(LibraryFolder.path == str(p))).first()
+    if existing:
+        raise HTTPException(400, "Folder path is already watched by another library/folder")
+        
+    folder = LibraryFolder(library_id=library_id, path=str(p))
+    session.add(folder)
+    session.commit()
+    session.refresh(folder)
+    
+    threading.Thread(target=scan_library, args=(library_id,), daemon=True).start()
+    sync_watchdog_observers()
+    return LibraryFolderOut(id=folder.id, path=folder.path)
+
+
+@app.delete("/api/libraries/{library_id}/folders/{folder_id}")
+def delete_library_folder(library_id: int, folder_id: int, session: Session = Depends(get_session)):
+    folder = session.get(LibraryFolder, folder_id)
+    if not folder or folder.library_id != library_id:
+        raise HTTPException(404, "Folder not found in this library")
+    
+    session.delete(folder)
+    session.commit()
+    sync_watchdog_observers()
+    threading.Thread(target=scan_library, args=(library_id,), daemon=True).start()
+    return {"ok": True}
+
+
+# ── Statistics and Scoped Lists ────────────────────────────────────────────────
+
 @app.get("/api/stats")
-def stats(session: Session = Depends(get_session)):
-    return get_stats(session)
+def stats(library_id: int | None = None, session: Session = Depends(get_session)):
+    if library_id is None:
+        first_lib = session.exec(select(Library)).first()
+        library_id = first_lib.id if first_lib else 0
+    return get_stats(session, library_id)
 
 @app.get("/api/tags")
-def list_tags(session: Session = Depends(get_session)):
-    return [{"id": t.id, "name": t.name} for t in session.exec(select(Tag)).all()]
+def list_tags(library_id: int | None = None, session: Session = Depends(get_session)):
+    if library_id is None:
+        first_lib = session.exec(select(Library)).first()
+        library_id = first_lib.id if first_lib else 0
+    books = session.exec(select(Book).where(Book.library_id == library_id)).all()
+    tags = set()
+    for b in books:
+        for t in b.tags:
+            tags.add((t.id, t.name))
+    return [{"id": tid, "name": name} for tid, name in sorted(tags, key=lambda x: x[1])]
 
 @app.get("/api/categories")
-def list_categories(session: Session = Depends(get_session)):
-    return sorted({b.category for b in get_all_books(session) if b.category})
+def list_categories(library_id: int | None = None, session: Session = Depends(get_session)):
+    if library_id is None:
+        first_lib = session.exec(select(Library)).first()
+        library_id = first_lib.id if first_lib else 0
+    books = session.exec(select(Book).where(Book.library_id == library_id)).all()
+    return sorted({b.category for b in books if b.category})
 
 @app.get("/api/library-path")
-def get_library_path():
+def get_library_path(session: Session = Depends(get_session)):
+    first_lib = session.exec(select(Library)).first()
+    path = ""
+    if first_lib and first_lib.folders:
+        path = first_lib.folders[0].path
     return {
-        "path": load_library_path(),
-        "is_docker": os.environ.get("SHELFIE_DATA_DIR", "").startswith("/data"),
+        "path": path,
+        "is_docker": _is_docker_runtime(),
     }
 
 
@@ -639,26 +783,32 @@ def get_version_info():
     }
 
 @app.post("/api/library-path")
-def set_library_path(data: LibraryPathIn):
-    global _watchdog_observer
+def set_library_path(data: LibraryPathIn, session: Session = Depends(get_session)):
     p = Path(data.path.strip()).resolve()
     if not p.exists() or not p.is_dir():
         raise HTTPException(400, "Path does not exist or is not a directory")
-    save_library_path(str(p))
-    if _watchdog_observer:
-        try:
-            _watchdog_observer.stop()
-            _watchdog_observer.join(timeout=2)
-        except Exception:
-            pass
-    threading.Thread(target=scan_library, args=(str(p),), daemon=True).start()
-    _watchdog_observer = start_watchdog(str(p))
+    
+    first_lib = session.exec(select(Library)).first()
+    if first_lib:
+        if first_lib.folders:
+            folder = first_lib.folders[0]
+            folder.path = str(p)
+            session.add(folder)
+        else:
+            folder = LibraryFolder(library_id=first_lib.id, path=str(p))
+            session.add(folder)
+        session.commit()
+        sync_watchdog_observers()
+        threading.Thread(target=scan_library, args=(first_lib.id,), daemon=True).start()
     return {"ok": True, "path": str(p)}
 
 @app.post("/api/rescan")
-def rescan():
-    lib = load_library_path()
-    threading.Thread(target=scan_library, args=(lib,), daemon=True).start()
+def rescan(library_id: int | None = None, session: Session = Depends(get_session)):
+    if library_id is None:
+        first_lib = session.exec(select(Library)).first()
+        library_id = first_lib.id if first_lib else 0
+    if library_id:
+        threading.Thread(target=scan_library, args=(library_id,), daemon=True).start()
     return {"ok": True}
 
 
