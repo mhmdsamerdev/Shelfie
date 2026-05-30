@@ -3,13 +3,15 @@ database.py — SQLModel models and zero-loss database initialisation.
 """
 
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import event, text
 from sqlmodel import Field, Relationship, Session, SQLModel, create_engine, select
 
-from shelfie.config import DATABASE_URL
+from shelfie.config import DATABASE_URL, CONFIG_FILE, DEFAULT_LIBRARY_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,32 @@ def _set_sqlite_pragma(dbapi_connection, _connection_record):
     cursor.execute("PRAGMA journal_mode=WAL")   # concurrent reads + one writer
     cursor.execute("PRAGMA busy_timeout=5000")  # retry for up to 5 s before raising OperationalError
     cursor.close()
+
+
+# ── Library ────────────────────────────────────────────────────────────────────
+
+class Library(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(index=True, unique=True)
+    
+    folders: list["LibraryFolder"] = Relationship(
+        back_populates="library",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+    books: list["Book"] = Relationship(
+        back_populates="library",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+
+# ── LibraryFolder ──────────────────────────────────────────────────────────────
+
+class LibraryFolder(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    library_id: int = Field(foreign_key="library.id", index=True)
+    path: str = Field(index=True, unique=True)
+    
+    library: Optional[Library] = Relationship(back_populates="folders")
 
 
 # ── Link table ─────────────────────────────────────────────────────────────────
@@ -70,7 +98,8 @@ class BookQuote(SQLModel, table=True):
 
 class Book(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    file_path: str = Field(index=True, unique=True)
+    library_id: int | None = Field(default=None, foreign_key="library.id", index=True)
+    file_path: str | None = Field(default=None, index=True, unique=True)
 
     title: str
     custom_title: str | None = None
@@ -90,6 +119,7 @@ class Book(SQLModel, table=True):
     date_started: datetime | None = None
     date_finished: datetime | None = None
 
+    library: Optional[Library] = Relationship(back_populates="books")
     tags: list[Tag] = Relationship(back_populates="books", link_model=BookTagLink)
     progress_logs: list[ProgressLog] = Relationship(
         back_populates="book",
@@ -117,6 +147,8 @@ def create_db_and_tables() -> None:
     """Create all tables (no-op for tables that already exist) then migrate."""
     SQLModel.metadata.create_all(engine)
     _safe_migrate()
+    with Session(engine) as session:
+        _backfill_default_library(session)
 
 
 def _safe_migrate() -> None:
@@ -156,6 +188,7 @@ def _safe_migrate() -> None:
         ("admin_notes",   "TEXT"),
         ("date_started",  "DATETIME"),
         ("date_finished", "DATETIME"),
+        ("library_id",    "INTEGER"),
     ]
 
     with engine.connect() as conn:
@@ -170,9 +203,55 @@ def _safe_migrate() -> None:
             except Exception:
                 pass   # already exists — intentional
 
+        try:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_book_library_id ON book (library_id)"))
+        except Exception:
+            pass
+
         conn.commit()
 
     logger.info("Database migration complete.")
+
+
+def _backfill_default_library(session: Session) -> None:
+    """Idempotently create Default Library and link existing orphaned books."""
+    first_lib = session.exec(select(Library)).first()
+    if not first_lib:
+        # Load path
+        path_str = ""
+        if CONFIG_FILE.exists():
+            path_str = CONFIG_FILE.read_text().strip()
+        if not path_str:
+            path_str = os.environ.get("LIBRARY_PATH", "").strip()
+        if not path_str:
+            path_str = DEFAULT_LIBRARY_PATH
+        
+        path_str = str(Path(path_str).expanduser().resolve())
+
+        # Create library
+        default_lib = Library(name="Default Library")
+        session.add(default_lib)
+        session.commit()
+        session.refresh(default_lib)
+
+        # Create folder
+        folder = LibraryFolder(library_id=default_lib.id, path=path_str)
+        session.add(folder)
+        session.commit()
+
+        # Update books
+        session.exec(text(f"UPDATE book SET library_id = {default_lib.id} WHERE library_id IS NULL"))
+        session.commit()
+        logger.info("Created 'Default Library' and associated all existing books and path.")
+    else:
+        # Link any newly created books or orphans to the first library
+        orphan_books = session.exec(select(Book).where(Book.library_id == None)).all()
+        if orphan_books:
+            for book in orphan_books:
+                book.library_id = first_lib.id
+                session.add(book)
+            session.commit()
+            logger.info("Associated %d orphaned books with library '%s'.", len(orphan_books), first_lib.name)
 
 
 # ── Session helper ─────────────────────────────────────────────────────────────
@@ -226,8 +305,11 @@ def get_quotes(session: Session, book_id: int) -> list[BookQuote]:
     ).all()
     )
 
-def get_stats(session: Session) -> dict:
-    books = get_all_books(session)
+def get_stats(session: Session, library_id: int | None = None) -> dict:
+    if library_id is not None:
+        books = list(session.exec(select(Book).where(Book.library_id == library_id)).all())
+    else:
+        books = get_all_books(session)
     total = len(books)
     read = sum(1 for b in books if b.is_read)
     in_progress = sum(1 for b in books if b.current_page > 0 and not b.is_read)
